@@ -1,145 +1,132 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Polygon Arbitrage Scanner</title>
-  <script src="https://cdn.ethers.io/lib/ethers-6.7.0.umd.min.js"></script>
-  <style>
-    body { background-color: #002b36; color: #eee; font-family: Arial; padding: 20px; }
-    table, th, td { border: 1px solid #555; border-collapse: collapse; padding: 5px; }
-    .button { margin: 10px 0; padding: 10px; background-color: #00695c; color: white; border: none; cursor: pointer; }
-    .button:hover { background-color: #004d40; }
-  </style>
+  <title>Polygon Arbitrage</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.8.1/dist/ethers.umd.min.js"></script>
 </head>
-<body>
+<body style="background-color:#002b36;color:#ffffff;font-family:sans-serif;padding:20px">
+  <h2>Polygon Arbitrage Interface</h2>
 
-  <h2>Polygon Arbitrage Scanner</h2>
+  <div>
+    <button onclick="connectWallet()">Connect Wallet</button>
+    <span id="walletAddress" style="margin-left:10px;color:lightgreen;"></span>
+  </div>
 
-  <button class="button" onclick="connectWallet()">Connect Wallet</button>
-  <label><input type="checkbox" id="autotrade"> Auto-Trade If Profitable</label>
-  <br/>
+  <div style="margin-top:10px;">
+    <label><input type="checkbox" id="autoTradeToggle"> Auto-Trade If Profitable</label>
+  </div>
 
-  <table id="logTable">
-    <tr>
-      <th>Time</th>
-      <th>Token</th>
-      <th>Buy From</th>
-      <th>Sell To</th>
-      <th>Buy Price</th>
-      <th>Sell Price</th>
-      <th>Profit (%)</th>
-      <th>Status</th>
-    </tr>
+  <table border="1" cellpadding="8" cellspacing="0" style="margin-top:20px;border-color:#999;">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Token</th>
+        <th>Buy DEX</th>
+        <th>Sell DEX</th>
+        <th>Buy Price</th>
+        <th>Sell Price</th>
+        <th>Est. Profit (%)</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody id="logTable"></tbody>
   </table>
 
   <script>
-    const flashLoanAddress = "0xe0A6d56Fbc4a4E4E94E0D2B9D52adc323Dfa55Ee";
-    const abi = [
-      "function executeArbitrage(address token, uint256 amount, bool buyOnQuickSwap, bool sellOnQuickSwap) external",
-      "function owner() view returns (address)"
-    ];
-
-    const tokens = [
-      { symbol: "AAVE", address: "0xD6DF932A45C0f255f85145f286eA0b292B21C90B", decimals: 18 },
-      { symbol: "SHIB", address: "0x6f8A06447ff6fcf75d803135a7d3e5b886b3b4bc", decimals: 18 }
-    ];
-
-    const routers = [
-      { name: "QuickSwap", address: "0xa5E0829CaCED8fFDD4De3c43696c57F7D7A678ff" },
-      { name: "SushiSwap", address: "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506" }
-    ];
-
-    let provider, signer;
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    let signer, userAddress;
 
     async function connectWallet() {
-      if (!window.ethereum) return alert("Install MetaMask");
-      await ethereum.request({ method: 'eth_requestAccounts' });
-      provider = new ethers.BrowserProvider(window.ethereum);
+      await provider.send("eth_requestAccounts", []);
       signer = await provider.getSigner();
-      testConnection();
-      scanLoop();
+      userAddress = await signer.getAddress();
+      document.getElementById("walletAddress").textContent = "Connected: " + userAddress;
     }
 
-    async function testConnection() {
-      try {
-        const flashLoanContract = new ethers.Contract(flashLoanAddress, abi, provider);
-        const owner = await flashLoanContract.owner();
-        console.log("Connected. Contract owner:", owner);
-      } catch (err) {
-        alert("Smart contract not connected: " + err.message);
-      }
-    }
+    const tokens = [
+      { symbol: "SHIB", address: "0x6f8A06447ff6fcf75d803135a7d3e5b886b3b4bc" },
+      { symbol: "AAVE", address: "0xD6DF932A45C0f255f85145f286eA0b292B21C90B" }
+    ];
 
-    async function fetchPrice(router, tokenAddress) {
-      const routerContract = new ethers.Contract(router.address, [
-        "function getAmountsOut(uint amountIn, address[] memory path) public view returns (uint[] memory amounts)"
-      ], provider);
+    const quickRouter = "0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff";
+    const sushiRouter = "0x1b02da8cb0d097eb8d57a175b88c7d8b47997506";
+    const USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
+    const routerAbi = [
+      "function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)"
+    ];
+
+    async function getPrice(routerAddr, fromToken, toToken, amountIn) {
       try {
-        const result = await routerContract.getAmountsOut(
-          ethers.parseUnits("10", 6), // 10 USDC
-          ["0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", tokenAddress]
-        );
-        return parseFloat(ethers.formatUnits(result[1], 18));
-      } catch {
+        const router = new ethers.Contract(routerAddr, routerAbi, provider);
+        const path = [fromToken, toToken];
+        const amounts = await router.getAmountsOut(amountIn, path);
+        return Number(ethers.formatUnits(amounts[1], 6));
+      } catch (e) {
         return 0;
       }
     }
 
-    async function scanLoop() {
-      while (true) {
-        for (const token of tokens) {
-          for (let i = 0; i < routers.length; i++) {
-            for (let j = 0; j < routers.length; j++) {
-              if (i === j) continue;
+    async function scan() {
+      const amountIn = ethers.parseUnits("10", 6); // 10 USDC
+      const autoTrade = document.getElementById("autoTradeToggle").checked;
 
-              const buyRouter = routers[i];
-              const sellRouter = routers[j];
+      for (const token of tokens) {
+        const buyPriceQuick = await getPrice(quickRouter, USDC, token.address, amountIn);
+        const sellPriceSushi = await getPrice(sushiRouter, token.address, USDC, amountIn);
 
-              const buyPrice = await fetchPrice(buyRouter, token.address);
-              const sellPrice = await fetchPrice(sellRouter, token.address);
-              const profit = ((sellPrice - buyPrice) / buyPrice) * 100;
+        const buyPriceSushi = await getPrice(sushiRouter, USDC, token.address, amountIn);
+        const sellPriceQuick = await getPrice(quickRouter, token.address, USDC, amountIn);
 
-              logRow(token.symbol, buyRouter.name, sellRouter.name, buyPrice, sellPrice, profit);
+        const profitQuickToSushi = sellPriceSushi - buyPriceQuick;
+        const profitSushiToQuick = sellPriceQuick - buyPriceSushi;
 
-              if (profit > 0 && document.getElementById("autotrade").checked) {
-                try {
-                  const flashLoanContract = new ethers.Contract(flashLoanAddress, abi, signer);
-                  const amount = ethers.parseUnits("10", 6); // 10 USDC
-                  const tx = await flashLoanContract.executeArbitrage(
-                    token.address,
-                    amount,
-                    buyRouter.name === "QuickSwap",
-                    sellRouter.name === "QuickSwap"
-                  );
-                  await tx.wait();
-                  logRow(token.symbol, buyRouter.name, sellRouter.name, buyPrice, sellPrice, profit, tx.hash);
-                } catch (err) {
-                  console.error("Trade failed:", err.message);
-                }
-              }
-            }
-          }
+        const profitPercentQtoS = ((profitQuickToSushi / buyPriceQuick) * 100).toFixed(2);
+        const profitPercentStoQ = ((profitSushiToQuick / buyPriceSushi) * 100).toFixed(2);
+
+        const now = new Date().toLocaleTimeString();
+        let status = "No Trade";
+
+        if (autoTrade && profitQuickToSushi > 0) {
+          status = "BUY Q > SELL S";
+          await executeArbitrage(token.address, amountIn, true, false);
+        } else if (autoTrade && profitSushiToQuick > 0) {
+          status = "BUY S > SELL Q";
+          await executeArbitrage(token.address, amountIn, false, true);
         }
-        await new Promise(r => setTimeout(r, 10000));
+
+        const row = `<tr>
+          <td>${now}</td>
+          <td>${token.symbol}</td>
+          <td>QuickSwap</td>
+          <td>SushiSwap</td>
+          <td>${buyPriceQuick}</td>
+          <td>${sellPriceSushi}</td>
+          <td>${profitPercentQtoS}</td>
+          <td>${status}</td>
+        </tr>`;
+        document.getElementById("logTable").innerHTML += row;
       }
     }
 
-    function logRow(token, buyFrom, sellTo, buyPrice, sellPrice, profit, txHash = "") {
-      const table = document.getElementById("logTable");
-      const row = table.insertRow(1);
-      row.innerHTML = `
-        <td>${new Date().toLocaleTimeString()}</td>
-        <td>${token}</td>
-        <td>${buyFrom}</td>
-        <td>${sellTo}</td>
-        <td>${buyPrice.toFixed(6)}</td>
-        <td>${sellPrice.toFixed(6)}</td>
-        <td>${profit.toFixed(2)}%</td>
-        <td>${txHash ? `<a href="https://polygonscan.com/tx/${txHash}" target="_blank">View TX</a>` : "Scanned"}</td>
-      `;
+    async function executeArbitrage(token, amount, buyQuick, sellQuick) {
+      const contractAddr = "0xe0A6d56Fbc4a4E4E94E0D2B9D52adc323Dfa55Ee";
+      const abi = [
+        "function executeArbitrage(address token, uint256 amount, bool buyOnQuickSwap, bool sellOnQuickSwap) external"
+      ];
+      const contract = new ethers.Contract(contractAddr, abi, signer);
+      try {
+        const tx = await contract.executeArbitrage(token, amount, buyQuick, sellQuick);
+        await tx.wait();
+        console.log("Executed arbitrage tx:", tx.hash);
+      } catch (e) {
+        console.warn("Trade failed", e.reason || e);
+      }
     }
+
+    setInterval(() => {
+      if (signer) scan();
+    }, 10000); // every 10s
   </script>
 </body>
 </html>
